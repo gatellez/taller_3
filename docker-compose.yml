@@ -1,0 +1,145 @@
+x-airflow-env: &airflow_env
+  AIRFLOW__CORE__EXECUTOR: ${AIRFLOW__CORE__EXECUTOR}
+  AIRFLOW__CORE__LOAD_EXAMPLES: ${AIRFLOW__CORE__LOAD_EXAMPLES}
+  AIRFLOW__WEBSERVER__RBAC: ${AIRFLOW__WEBSERVER__RBAC}
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
+  AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY}
+  AIRFLOW__CELERY__BROKER_URL: ${AIRFLOW__CELERY__BROKER_URL}
+  AIRFLOW__CELERY__RESULT_BACKEND: ${AIRFLOW__CELERY__RESULT_BACKEND}
+  DATA_DB_HOST: ${DATA_DB_HOST}
+  DATA_DB_PORT: ${DATA_DB_PORT}
+  DATA_DB_USER: ${DATA_DB_USER}
+  DATA_DB_PASSWORD: ${DATA_DB_PASSWORD}
+  DATA_DB_NAME: ${DATA_DB_NAME}
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports: ["${POSTGRES_PORT}:5432"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
+      interval: 5s
+      retries: 10
+
+  penguins-db:
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_DATABASE: ${DATA_DB_NAME}
+      MARIADB_USER: ${DATA_DB_USER}
+      MARIADB_PASSWORD: ${DATA_DB_PASSWORD}
+    ports: ["${DATA_DB_PORT}:3306"]
+    command: ["--default-authentication-plugin=mysql_native_password","--max-connections=200"]
+    volumes:
+      - penguins_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL","mariadb -h 127.0.0.1 -uroot -proot -e 'SELECT 1;' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      start_period: 60s
+      retries: 20
+
+  airflow-init:
+    build: ./airflow
+  # NO entrypoint aquí
+    user: "airflow"
+    depends_on:
+      - postgres
+    environment: *airflow_env
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./models:/opt/airflow/models
+    command: ["bash","-lc","airflow db init && airflow users create --username ${AIRFLOW_ADMIN_USER} --password ${AIRFLOW_ADMIN_PASSWORD} --firstname Admin --lastname User --role Admin --email ${AIRFLOW_ADMIN_EMAIL}"]
+
+
+
+  airflow-webserver:
+    build: ./airflow
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+      penguins-db:
+        condition: service_healthy
+    environment: *airflow_env
+    ports: ["8081:8080"]
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./models:/opt/airflow/models
+    command: bash -lc "airflow webserver"
+
+  airflow-scheduler:
+    build: ./airflow
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    environment: *airflow_env
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./models:/opt/airflow/models
+    command: bash -lc "airflow scheduler"
+
+  airflow-worker:
+    build: ./airflow
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    environment: *airflow_env
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./models:/opt/airflow/models
+    command: bash -lc "airflow celery worker"
+
+  flower:
+    build: ./airflow
+    restart: unless-stopped
+    depends_on:
+      - airflow-scheduler
+      - airflow-worker
+    environment: *airflow_env
+    ports: ["5555:5555"]
+    command: bash -lc "airflow celery flower"
+
+  api:
+    build: ./api
+    environment:
+      MODEL_PATH: /models/model.pkl
+    ports: ["${API_PORT}:8000"]
+    depends_on:
+      penguins-db:
+        condition: service_healthy
+    volumes:
+      - ./models:/models
+
+volumes:
+  postgres_data:
+  penguins_data:
