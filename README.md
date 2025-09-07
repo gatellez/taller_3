@@ -1,4 +1,4 @@
-# Taller 4 – Orquestación con Airflow y Despliegue de API para Inferencia
+# Taller 3 – Orquestación con Airflow y Despliegue de API para Inferencia
 
 ## Integrantes
 - **Yibby González**  
